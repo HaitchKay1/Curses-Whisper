@@ -3,6 +3,7 @@ import {
   ISTTService
 } from "../types";
 
+import { microphoneConstraints } from "../mic";
 import { isEmptyValue } from "../../../../utils";
 import { STT_State } from "../schema";
 
@@ -20,10 +21,11 @@ export class STT_DeepgramService implements ISTTService {
 
   start(state: STT_State): void {
 
-    if (Object.values(state.deepgram).some(isEmptyValue))
+    const { device: _device, ...rest } = state.deepgram;
+    if (Object.values(rest).some(isEmptyValue))
       return this.bindings.onStop("Options missing");
 
-    navigator.mediaDevices.getUserMedia({audio: {deviceId: {exact: this.state.device}}}).then((stream) => {
+    navigator.mediaDevices.getUserMedia(microphoneConstraints(state.inputDevice)).then((stream) => {
       this.recorder = new MediaRecorder(stream, { mimeType: "audio/webm" });
       this.socket = new WebSocket(
         `wss://api.deepgram.com/v1/listen?punctuate=${!!state.deepgram.punctuate}&interim_results=${!!state.deepgram.interim}&language=${state.deepgram.language}&tier=${state.deepgram.tier}`,
@@ -63,6 +65,8 @@ export class STT_DeepgramService implements ISTTService {
         else
           this.bindings.onStop(ev.code === 1006 ? "" : "[Deepgram] Unexpected error");
       };
+    }).catch((error: Error) => {
+      this.bindings.onStop(error?.message || "Microphone error");
     });
   }
 

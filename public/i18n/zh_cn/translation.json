@@ -65,6 +65,10 @@
     "field_uwu_filter": "生成颜文字",
     "field_uwu_filter_desc": "只能在英语下使用 (* ^ ω ^)!!1",
     "state_muted": "静音",
+    "field_microphone": "麦克风",
+    "field_microphone_desc": "所有语音转文本服务都使用这个麦克风。系统默认跟随操作系统里设置的麦克风。",
+    "mic_system_default": "系统默认",
+    "mic_refresh": "刷新麦克风",
     "state_": "静音",
 
     "native_title": "本地",
@@ -91,7 +95,15 @@
     "azure_profanity_masked": "隐藏",
     "azure_profanity_removed": "移除",
     "azure_profanity_raw": "不处理",
-    "azure_silence_timeout": "静音超时"
+    "azure_silence_timeout": "静音超时",
+    "whisper_title": "OpenAI Whisper",
+    "whisper_offline": "在本机运行。选中的模型会下载到 Curses 旁边的 Models 文件夹。",
+    "whisper_language": "语言",
+    "whisper_translate": "把语音翻译成英语",
+    "whisper_silence": "静音超时（秒）",
+    "whisper_downloading": "正在下载",
+    "whisper_ready": "{{model}} 已就绪",
+    "whisper_folder": "模型文件夹：{{path}}"
   },
   "tts": {
     "title": "文本转语音",

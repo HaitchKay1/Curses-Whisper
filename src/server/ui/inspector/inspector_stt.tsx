@@ -1,17 +1,28 @@
 import { STT_Backends, STT_State } from "@/server/services/stt/schema";
 import { ServiceNetworkState } from "@/types";
 import { invoke } from "@tauri-apps/api/tauri";
-import { FC } from "react";
+import { listen, UnlistenFn } from "@tauri-apps/api/event";
+import { FC, useEffect, useState } from "react";
 import { RiCharacterRecognitionFill, RiUserVoiceFill } from "react-icons/ri";
 import { SiGooglechrome, SiMicrosoftedge } from "react-icons/si";
 import { useSnapshot } from "valtio";
 import { azureLanguages, deepGramLangs, nativeLangs } from "../../services/stt/stt_data";
+import { WHISPER_LANGUAGES, WHISPER_MODELS, whisperModelById } from "../../services/stt/whisper_models";
 import ServiceButton from "../service-button";
 import Inspector from "./components";
 import { InputCheckbox, InputMapObject, InputMappedGroupSelect, InputSelect, InputText, InputWebAudioInput } from "./components/input";
 import NiceModal from "@ebay/nice-modal-react";
 import Modal from "../Modal";
 import { useTranslation } from 'react-i18next';
+
+type WhisperProgress = {
+  model: string;
+  phase: string;
+  received: number;
+  total: number;
+  done: boolean;
+  message: string;
+};
 
 const Native: FC = () => {
   const {t} = useTranslation();
@@ -42,7 +53,7 @@ const Browser: FC = () => {
     invoke("plugin:web|open_browser", {
       data: {
         browser: "chrome",
-        url: `http://localhost:${window.Config.serverNetwork.port}/mic.html`
+        url: `http://localhost:${window.Config.serverNetwork.port}/mic.html?device=${encodeURIComponent(window.ApiServer.state.services.stt.data.inputDevice || "default")}`
       }
     });
   };
@@ -51,7 +62,7 @@ const Browser: FC = () => {
     invoke("plugin:web|open_browser", {
       data: {
         browser: "msedge",
-        url: `http://localhost:${window.Config.serverNetwork.port}/mic.html`
+        url: `http://localhost:${window.Config.serverNetwork.port}/mic.html?device=${encodeURIComponent(window.ApiServer.state.services.stt.data.inputDevice || "default")}`
       }
     });
   };
@@ -86,8 +97,6 @@ const Azure: FC = () => {
     <Inspector.SubHeader>{t('stt.azure_title')}</Inspector.SubHeader>
     <InputText label="stt.azure_key" type="password" value={pr.key} onChange={e => up("key", e.target.value)} />
     <InputText label="stt.azure_location" value={pr.location} onChange={e => up("location", e.target.value)} />
-
-    <InputWebAudioInput value={pr.device} onChange={e => up("device", e)} label="common.field_input_device"/>
 
     <div className=" divider"></div>
     <InputMappedGroupSelect
@@ -135,7 +144,6 @@ const Deepgram: FC = () => {
     <Inspector.SubHeader>{t('stt.deepgram_title')}</Inspector.SubHeader>
     <InputText label="stt.deepgram_key" type="password" value={pr.key} onChange={e => up("key", e.target.value)} />
 
-    <InputWebAudioInput value={pr.device} onChange={e => up("device", e)} label="common.field_input_device"/>
     <InputMappedGroupSelect
       labelGroup="common.field_language"
       labelOption="common.field_dialect"
@@ -167,8 +175,86 @@ const Speechly: FC = () => {
 
   return <>
     <Inspector.SubHeader>{t('stt.speechly_title')}</Inspector.SubHeader>
-    <InputWebAudioInput value={pr.device} onChange={e => up("device", e)} label="common.field_input_device"/>
     <InputText label="stt.speechly_appid" type="password" value={pr.key} onChange={e => up("key", e.target.value)} />
+  </>
+}
+
+const formatBytes = (value: number) => {
+  if (!value) return "";
+  if (value >= 1_000_000_000) return `${(value / 1_000_000_000).toFixed(1)} GB`;
+  if (value >= 1_000_000) return `${Math.round(value / 1_000_000)} MB`;
+  return `${Math.round(value / 1000)} KB`;
+};
+
+const Whisper: FC = () => {
+  const {t} = useTranslation();
+  const pr = useSnapshot(window.ApiServer.state.services.stt.data.whisper);
+  const up = <K extends keyof STT_State["whisper"]>(key: K, v: STT_State["whisper"][K]) => window.ApiServer.state.services.stt.data.whisper[key] = v;
+  const model = whisperModelById(pr.model);
+  const [progress, setProgress] = useState<WhisperProgress | null>(null);
+  const [modelsDir, setModelsDir] = useState("");
+  const [ready, setReady] = useState(false);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let unlisten: UnlistenFn | undefined;
+    let cancel = false;
+    if (!window.Config.isApp()) {
+      setModelsDir("Models (saved next to the Curses program)");
+      if (pr.model === "tiny") {
+        setReady(true);
+        setError("");
+      } else {
+        setReady(false);
+        setError("This preview can try Tiny. Other models download in the desktop app, into the Models folder next to Curses.");
+      }
+      return;
+    }
+    invoke<string>("plugin:whisper|models_dir").then(setModelsDir).catch(() => {});
+    listen<WhisperProgress>("whisper-download", (event) => {
+      if (event.payload.model === window.ApiServer.state.services.stt.data.whisper.model)
+        setProgress(event.payload);
+    }).then(fn => {
+      if (cancel) fn();
+      else unlisten = fn;
+    });
+    setError("");
+    setReady(false);
+    setProgress(null);
+    invoke("plugin:whisper|download_model", { model: pr.model })
+      .then(() => { if (!cancel) setReady(true); })
+      .catch((err: unknown) => {
+        if (cancel) return;
+        const message = typeof err === "string" ? err : err instanceof Error ? err.message : "Download failed";
+        setError(message);
+      });
+    return () => {
+      cancel = true;
+      unlisten?.();
+    };
+  }, [pr.model]);
+
+  const pct = progress && progress.total > 0 ? Math.min(100, Math.round((progress.received / progress.total) * 100)) : 0;
+
+  return <>
+    <Inspector.SubHeader>{t('stt.whisper_title')}</Inspector.SubHeader>
+    <Inspector.Description>{t('stt.whisper_offline')}</Inspector.Description>
+    <InputSelect
+      label="stt.whisper_language"
+      options={model.english ? [{ label: "English", value: "en" }] : WHISPER_LANGUAGES}
+      value={model.english ? "en" : pr.language}
+      onValueChange={e => up("language", e)}
+    />
+    {!model.english && <InputCheckbox label="stt.whisper_translate" value={pr.translate} onChange={e => up("translate", e)} />}
+    <InputCheckbox label="stt.field_enable_interim_results" onChange={e => up("interim", e)} value={pr.interim} />
+    <InputText type="number" step="0.1" min="0.3" label="stt.whisper_silence" value={pr.silenceTimeout} onChange={e => up("silenceTimeout", e.target.value)} />
+    {progress && !progress.done && !ready && <div className="space-y-1">
+      <progress className="progress progress-primary w-full" value={pct} max={100}></progress>
+      <span className="text-xs text-base-content/70">{progress.message || t('stt.whisper_downloading')} {pct ? `${pct}%` : ""} {progress.total ? `(${formatBytes(progress.received)} / ${formatBytes(progress.total)})` : ""}</span>
+    </div>}
+    {ready && !error && <span className="text-xs text-success">{t('stt.whisper_ready', { model: model.label })}</span>}
+    {error && <span className="text-xs text-error">{error}</span>}
+    {modelsDir && <Inspector.Description>{t('stt.whisper_folder', { path: modelsDir })}</Inspector.Description>}
   </>
 }
 
@@ -213,20 +299,46 @@ const Inspector_STT: FC = () => {
       <InputCheckbox label="common.field_auto_start" value={data.data.autoStart} onChange={e => up("autoStart", e)} />
       <InputCheckbox label="stt.field_stop_with_stream" value={data.data.stopWithStream} onChange={e => up("stopWithStream", e)} />
       <span className="link link-accent link-hover font-semibold flex items-center gap-2 text-sm" onClick={handleShowReplacements}><RiCharacterRecognitionFill/>{t('common.btn_edit_replacements')}</span>
+      <InputWebAudioInput value={data.data.inputDevice} onChange={device => {
+        up("inputDevice", device);
+        if (state.status !== ServiceNetworkState.disconnected) {
+          window.ApiServer.stt.stop();
+          window.setTimeout(() => window.ApiServer.stt.start(), 250);
+        }
+      }} label="stt.field_microphone"/>
+      <Inspector.Description>{t('stt.field_microphone_desc')}</Inspector.Description>
       <Inspector.Deactivatable active={state.status === ServiceNetworkState.disconnected}>
         <InputSelect options={[
           { label: "Native", value: STT_Backends.native },
           { label: "Browser", value: STT_Backends.browser },
           { label: "Azure", value: STT_Backends.azure },
           { label: "Deepgram", value: STT_Backends.deepgram },
-          { label: "Speechly", value: STT_Backends.speechly }
-        ]} label="common.field_service" value={data.data.backend} onValueChange={e => up("backend", e as STT_Backends)} />
+          { label: "Speechly", value: STT_Backends.speechly },
+          {
+            label: "OpenAI Whisper",
+            options: WHISPER_MODELS.map(model => ({
+              label: `Whisper ${model.label} · ${model.size}`,
+              value: `whisper:${model.id}`,
+            })),
+          },
+        ]} label="common.field_service" value={data.data.backend === STT_Backends.whisper ? `whisper:${data.data.whisper.model}` : data.data.backend} onValueChange={value => {
+          if (value.startsWith("whisper:")) {
+            const model = value.slice("whisper:".length);
+            window.ApiServer.patchService("stt", s => {
+              s.data.backend = STT_Backends.whisper;
+              s.data.whisper.model = model;
+            });
+          } else {
+            up("backend", value as STT_Backends);
+          }
+        }} />
 
         {data.data.backend === STT_Backends.browser && <Browser />}
         {data.data.backend === STT_Backends.azure && <Azure />}
         {data.data.backend === STT_Backends.deepgram && <Deepgram />}
         {data.data.backend === STT_Backends.speechly && <Speechly />}
         {data.data.backend === STT_Backends.native && <Native />}
+        {data.data.backend === STT_Backends.whisper && <Whisper />}
       </Inspector.Deactivatable>
 
       {data.data.backend !== STT_Backends.browser && <ServiceButton status={state.status} onStart={() => window.ApiServer.stt.start()} onStop={() => window.ApiServer.stt.stop()} />}

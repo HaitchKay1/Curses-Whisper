@@ -13,6 +13,17 @@ dev-dist
 dist-ssr
 *.local
 
+# Rust and Whisper downloads. Do not commit these.
+src-tauri/target
+Models
+.preview-whisper
+
+# Local env. Twitch client id belongs in GitHub Actions secrets, not in git.
+.env
+
+# Kept in the source zip so the publisher knows what to upload. Not part of the app.
+UPLOAD.txt
+
 # Editor directories and files
 .vscode/*
 !.vscode/extensions.json

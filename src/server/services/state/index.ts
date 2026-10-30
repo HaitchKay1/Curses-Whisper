@@ -31,6 +31,9 @@ class Service_State implements IServiceInterface {
   }
 
   async #load_state(): Promise<Record<string, any> | undefined> {
+    if (!window.__TAURI_METADATA__) {
+      return this.tryParseState(localStorage.getItem("curses-settings"));
+    }
     const decoder = new TextDecoder();
     const fileExists = await exists("user/settings", {dir: BaseDirectory.AppData});
     if (!fileExists)
@@ -44,6 +47,10 @@ class Service_State implements IServiceInterface {
   }
 
   #save_state = debounce(async () => {
+    if (!window.__TAURI_METADATA__) {
+      localStorage.setItem("curses-settings", JSON.stringify(this.state));
+      return;
+    }
     const encoder = new TextEncoder();
     const bExists = await exists("user", { dir: BaseDirectory.AppData });
     if (!bExists)

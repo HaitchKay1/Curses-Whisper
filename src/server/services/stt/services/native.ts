@@ -1,3 +1,4 @@
+import { microphoneConstraints } from "../mic";
 import { isEmptyValue } from "@/utils";
 import { STT_State } from "../schema";
 import {
@@ -9,6 +10,8 @@ export class STT_NativeService implements ISTTService {
   constructor(private bindings: ISTTReceiver) {}
   
   #instance?: SpeechRecognition;
+  #stream?: MediaStream;
+  #stopped = false;
   
   dispose(): void {}
   
@@ -29,8 +32,23 @@ export class STT_NativeService implements ISTTService {
   start(state: STT_State): void {
     if (Object.values(state.native).some(isEmptyValue))
       return this.bindings.onStop("Options missing");
+    this.#stopped = false;
 
     const sp = window.webkitSpeechRecognition || window.SpeechRecognition;
+    // Hold the chosen input open. Chromium's recognizer follows the active capture device when it can.
+    navigator.mediaDevices.getUserMedia(microphoneConstraints(state.inputDevice)).then((stream) => {
+      if (this.#stopped) {
+        stream.getTracks().forEach(track => track.stop());
+        return;
+      }
+      this.#stream = stream;
+      this.#startRecognition(sp, state);
+    }).catch(() => {
+      if (!this.#stopped) this.#startRecognition(sp, state);
+    });
+  }
+
+  #startRecognition(sp: new () => SpeechRecognition, state: STT_State) {
 
     this.#instance = new sp();
     this.#instance.lang = state.native.language;
@@ -53,10 +71,16 @@ export class STT_NativeService implements ISTTService {
   }
 
   stop(error?: string): void {
-    if (!this.#instance)
+    this.#stopped = true;
+    this.#stream?.getTracks().forEach(track => track.stop());
+    this.#stream = undefined;
+    if (!this.#instance) {
+      this.bindings.onStop(error);
       return;
+    }
     this.#instance.onend = null;
     this.#instance.stop();
+    this.#instance = undefined;
     this.bindings.onStop(error);
   }
 }

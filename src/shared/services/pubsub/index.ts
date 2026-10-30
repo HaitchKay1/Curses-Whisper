@@ -65,7 +65,7 @@ class Service_PubSub implements IServiceInterface {
   unregisterEvent = (eventValue: string) => this.registeredEvents.delete(eventValue);
 
   async init() {
-    window.Config.isServer() && listen('pubsub', (event) => {
+    window.Config.isServer() && window.__TAURI_METADATA__ && listen('pubsub', (event) => {
       this.consumePubSubMessage(event.payload as string);
     });
 

@@ -1,50 +1,64 @@
-name: 'release'
+name: release
 
 on:
   workflow_dispatch:
+  push:
+    tags:
+      - "v*"
 
 jobs:
-  build:
+  windows:
     permissions:
       contents: write
-    strategy:
-      fail-fast: false
-
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v3
-      - name: setup node
-        uses: actions/setup-node@v3
-        with:
-          node-version: 16
-      - name: Install pnpm
-        uses: pnpm/action-setup@v2
-        with:
-          version: 7.28.0
-      - uses: SebRollen/toml-action@v1.0.1
-        id: version
-        with:
-          file: 'src-tauri/Cargo.toml'
-          field: 'package.version'
-      - run: echo ${{steps.version.outputs.value}}
-      - name: setup rust
-        uses: dtolnay/rust-toolchain@stable
-      - name: setup pnpm deps
-        run: pnpm i
-      - name: compile
-        run: pnpm tauri build
-        env:
-          CURSES_TWITCH_CLIENT_ID: ${{secrets.CURSES_TWITCH_CLIENT_ID}}
+      - uses: actions/checkout@v4
 
-      - name: create release
-        uses: softprops/action-gh-release@v1
-#        if: ${{startsWith(github.ref, 'refs/tags/') }}
+      - uses: pnpm/action-setup@v4
         with:
-          name: Release ${{steps.version.outputs.value}}
-          tag_name: v${{steps.version.outputs.value}}
-          draft: true
-          generate_release_notes: true
+          version: 9
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - name: Read app version
+        id: version
+        shell: pwsh
+        run: |
+          $line = Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
+          $version = $line.Matches[0].Groups[1].Value
+          "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
+
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build Windows installers
+        run: pnpm tauri build
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.value }}
+          name: Curses v${{ steps.version.outputs.value }} Whisper fork
+          draft: false
+          prerelease: false
           fail_on_unmatched_files: true
           files: |
-            src-tauri/target/release/curses.exe
-            src-tauri/target/release/bundle/msi/curses_${{steps.version.outputs.value}}_x64_en-US.msi
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
+          body: |
+            Unofficial Windows build of Curses with local Whisper speech-to-text and one microphone picker for every caption service.
+
+            The Whisper integration was written by Grok (xAI). It was only tested enough to see that the functions ran. This is not an official Curses release. There is no warranty. Use it at your own risk.
+
+            Download the setup `.exe` (normal installer) or the `.msi` from the assets on this release.
+
+            Windows may warn that the installer is unrecognized because it is not code-signed. The first time you choose a Whisper model, stay online until that model and the runtime finish downloading into the Models folder next to the app.
+
+            Original app: https://github.com/mmpneo/curses
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

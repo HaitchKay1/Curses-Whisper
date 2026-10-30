@@ -54,7 +54,9 @@ export class STT_AzureService implements ISTTService {
     const langConfig = AutoDetectSourceLanguageConfig.fromLanguages(state.azure.secondary_language && state.azure.use_secondary_language ? 
       [state.azure.language, state.azure.secondary_language] : [state.azure.language]);
     langConfig.mode = LanguageIdMode.Continuous;
-    const audioConfig = AudioConfig.fromMicrophoneInput(state.azure.device);
+    const audioConfig = !state.inputDevice || state.inputDevice === "default"
+      ? AudioConfig.fromDefaultMicrophoneInput()
+      : AudioConfig.fromMicrophoneInput(state.inputDevice);
     this.#instance = SpeechRecognizer.FromConfig(
       speechConfig,
       langConfig,

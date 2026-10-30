@@ -162,6 +162,14 @@ class Service_Document implements IServiceInterface {
     if (window.Config.isClient()) {
       return;
     }
+    if (!window.Config.isApp()) {
+      const raw = localStorage.getItem("curses-template");
+      if (!raw) return;
+      const binary = atob(raw);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+      return bytes;
+    }
 
     const bExists = await exists("user/template", {
       dir: BaseDirectory.AppData,
@@ -177,10 +185,17 @@ class Service_Document implements IServiceInterface {
   }
 
   async #saveDocumentNative(doc: Y.Doc) {
+    const data = Y.encodeStateAsUpdate(doc);
+    if (!window.Config.isApp()) {
+      let binary = "";
+      const chunk = 0x8000;
+      for (let i = 0; i < data.length; i += chunk) binary += String.fromCharCode(...data.subarray(i, i + chunk));
+      localStorage.setItem("curses-template", btoa(binary));
+      return;
+    }
     const bExists = await exists("user", { dir: BaseDirectory.AppData });
     if (!bExists)
       await createDir("user", { dir: BaseDirectory.AppData, recursive: true });
-    const data = Y.encodeStateAsUpdate(doc);
     await writeBinaryFile("user/template", data, {append: false, dir: BaseDirectory.AppData});
   }
 

@@ -459,7 +459,12 @@
     
 
       async function spawnInstance() {
-        await navigator.mediaDevices.getUserMedia({ audio: true });
+        const params = new URLSearchParams(location.search);
+        const device = params.get("device") || "default";
+        const audio = !device || device === "default"
+          ? true
+          : { deviceId: { exact: device }, echoCancellation: true, noiseSuppression: true };
+        await navigator.mediaDevices.getUserMedia({ audio });
         let SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition
         sttInstance = new SpeechRecognition();
         sttInstance.continuous = true;

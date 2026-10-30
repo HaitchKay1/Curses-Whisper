@@ -180,7 +180,7 @@ export const InputSelect: FC<NewNewSelectProps> = ({ options, ...props }) => {
               <RadixSelect.ScrollUpButton className="flex items-center justify-center cursor-default h-4">
                 <HiChevronUp/>
               </RadixSelect.ScrollUpButton>
-              <RadixSelect.Viewport className="p-2 bg-base-100 space-y-1">
+              <RadixSelect.Viewport className="p-2 bg-base-100 space-y-1 max-h-80 overflow-y-auto">
                 {options?.map((item) => {
                 if ("options" in item) {
                   return <RadixSelect.Group key={item.label}>
@@ -605,22 +605,43 @@ const getMedia = async () => {
   try {
     await navigator.mediaDevices.getUserMedia({audio: true,});
     const list = await navigator.mediaDevices.enumerateDevices();
-    return list.filter(d => d.kind === "audioinput").map(d => ({ ...d, label: d.label, value: d.deviceId }))
+    const seen = new Set<string>();
+    const devices = list
+      .filter(d => d.kind === "audioinput")
+      .filter(d => d.deviceId !== "default" && d.deviceId !== "communications")
+      .filter(d => {
+        if (!d.deviceId || seen.has(d.deviceId)) return false;
+        seen.add(d.deviceId);
+        return true;
+      })
+      .map(d => ({ label: d.label || "Microphone", value: d.deviceId }));
+    return devices;
   } catch (error) {
     return []
   }
 }
 
 export const InputWebAudioInput: FC<AudioOutputProps> = memo(({ label, value, onChange }) => {
+  const {t} = useTranslation();
   const [devices, setDevices] = useState<InputSelectOption[]>([]);
   
   useEffect(() => {
-    getMedia().then(setDevices);
+    let cancel = false;
+    const load = () => getMedia().then(list => { if (!cancel) setDevices(list); });
+    load();
+    navigator.mediaDevices?.addEventListener?.("devicechange", load);
+    return () => {
+      cancel = true;
+      navigator.mediaDevices?.removeEventListener?.("devicechange", load);
+    };
   }, []);
 
-  return <InputSelect
-    value={value}
-    onValueChange={onChange}
-    options={devices || []}
-    label={label} />
+  return <div className="flex flex-col space-y-1">
+    <InputSelect
+      value={value || "default"}
+      onValueChange={onChange}
+      options={[{ label: t("stt.mic_system_default"), value: "default" }, ...devices]}
+      label={label} />
+    <button type="button" className="btn btn-xs btn-ghost self-end" onClick={() => getMedia().then(setDevices)}>{t("stt.mic_refresh")}</button>
+  </div>
 });

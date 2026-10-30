@@ -7,12 +7,15 @@ export enum STT_Backends {
   azure = "azure",
   deepgram = "deepgram",
   speechly = "speechly",
+  whisper = "whisper",
 }
 
 export const zodSTT_Backends = z.nativeEnum(STT_Backends);
 
 export const Service_STT_Schema = z.object({
   backend: zSafe(zodSTT_Backends, STT_Backends.native),
+  /** Microphone used by every speech-to-text backend. "default" follows the OS setting. */
+  inputDevice: zSafe(z.coerce.string(), "default"),
   autoStart: zSafe(z.coerce.boolean(), false),
   uwu: zSafe(z.coerce.boolean(), false),
   stopWithStream: zSafe(z.coerce.boolean(), false),
@@ -49,7 +52,14 @@ export const Service_STT_Schema = z.object({
     punctuate: zSafe(z.coerce.boolean(), true),
     profanity: zSafe(z.coerce.boolean(), true),
     interim: zSafe(z.coerce.boolean(), true),
-  }).default({})
+  }).default({}),
+  whisper: z.object({
+    model: zSafe(z.coerce.string(), "tiny"),
+    language: zSafe(z.coerce.string(), "auto"),
+    translate: zSafe(z.coerce.boolean(), false),
+    interim: zSafe(z.coerce.boolean(), true),
+    silenceTimeout: zSafe(zStringNumber(), "0.8"),
+  }).default({}),
 }).default({});
 
 export type STT_State = z.infer<typeof Service_STT_Schema>;

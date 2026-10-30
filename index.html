@@ -9,6 +9,14 @@
 
   <body>
     <div id="root"></div>
+    <script>
+      if (typeof window.__TAURI_IPC__ !== "function") {
+        window.__TAURI_IPC__ = function (payload) {
+          console.error("tauri-payload", JSON.stringify(payload));
+          return Promise.reject("This action needs the desktop app");
+        };
+      }
+    </script>
     <script type="module" src="/src/index.tsx"></script>
   </body>
 </html>

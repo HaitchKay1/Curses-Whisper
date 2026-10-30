@@ -69,12 +69,19 @@ class AppConfiguration {
     }
       // server is always app
     // load network params from rust
-    else {
+    else if (this.isApp()) {
       const appConfig    = await invoke<any>("plugin:web|config");
       this.serverNetwork = {
         ip:   appConfig.local_ip,
         host: "localhost",
         port: appConfig.port
+      }
+    }
+    else {
+      this.serverNetwork = {
+        ip: "127.0.0.1",
+        host: location.hostname,
+        port: location.port || "8080"
       }
     }
   }

@@ -4,6 +4,7 @@ import {
 } from "../types";
 
 import { BrowserClient, BrowserMicrophone, Segment } from "@speechly/browser-client";
+import { microphoneConstraints } from "../mic";
 import { isEmptyValue } from "../../../../utils";
 import { STT_State } from "../schema";
 
@@ -22,8 +23,8 @@ export class STT_SpeechlyService implements ISTTService {
   }
 
   async start(state: STT_State) {
-    // ignore device for now
-    if (Object.values(state.speechly).some(isEmptyValue))
+    const { device: _device, ...rest } = state.speechly;
+    if (Object.values(rest).some(isEmptyValue))
       return this.bindings.onStop("Options missing");
 
     this.#instance = new BrowserClient({
@@ -50,7 +51,12 @@ export class STT_SpeechlyService implements ISTTService {
     
     // intercept into speechly's mediaStream initialization
     this.#microphone.mediaStream?.getAudioTracks().forEach(t => t.stop());
-    this.#microphone.mediaStream = await navigator.mediaDevices.getUserMedia({audio: {deviceId: {exact: this.state.device}}});
+    try {
+      this.#microphone.mediaStream = await navigator.mediaDevices.getUserMedia(microphoneConstraints(state.inputDevice));
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Microphone error";
+      return this.bindings.onStop(message);
+    }
 
     if (!this.#microphone.mediaStream)
       return this.bindings.onStop("Error initialising");

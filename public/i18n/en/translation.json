@@ -65,6 +65,10 @@
     "field_uwu_filter": "UwU filter",
     "field_uwu_filter_desc": "Only works with English (* ^ ω ^)!!1",
     "field_stop_with_stream": "Stop with twitch stream",
+    "field_microphone": "Microphone",
+    "field_microphone_desc": "Used for every speech-to-text service. System default follows the microphone in your operating system settings.",
+    "mic_system_default": "System default",
+    "mic_refresh": "Refresh microphones",
     "state_muted": "Muted",
     "state_": "Muted",
 
@@ -94,7 +98,16 @@
     "azure_profanity_raw": "Raw",
     "azure_secondary_language": "Secondary language",
     "azure_use_secondary_language": "Enable secondary language",
-    "azure_silence_timeout": "Silence timeout"
+    "azure_silence_timeout": "Silence timeout",
+
+    "whisper_title": "OpenAI Whisper",
+    "whisper_offline": "Runs on this computer. The selected model is downloaded once into the Models folder next to Curses.",
+    "whisper_language": "Language",
+    "whisper_translate": "Translate speech to English",
+    "whisper_silence": "Silence timeout (seconds)",
+    "whisper_downloading": "Downloading",
+    "whisper_ready": "{{model}} is ready",
+    "whisper_folder": "Models folder: {{path}}"
   },
   "tts": {
     "title": "Text to speech",
