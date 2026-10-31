@@ -9,6 +9,7 @@ import { toast } from "react-toastify";
 import { proxy } from "valtio";
 import { Translation_Backends } from "./schema";
 import { Translation_AzureService } from "./services/azure";
+import { Translation_WhisperService } from "./services/whisper";
 import {
   ITranslationReceiver,
   ITranslationService,
@@ -24,6 +25,7 @@ const backends: {
   [k in Translation_Backends]: ITranslationServiceConstructor;
 } = {
   [Translation_Backends.azure]: Translation_AzureService,
+  [Translation_Backends.whisper]: Translation_WhisperService,
 };
 
 class Service_Translation implements IServiceInterface, ITranslationReceiver {
@@ -34,6 +36,8 @@ class Service_Translation implements IServiceInterface, ITranslationReceiver {
   serviceState = proxy({
     status: ServiceNetworkState.disconnected,
     error: "",
+    whisperProgress: "",
+    whisperLastResult: "",
   });
   #id = 0;
 

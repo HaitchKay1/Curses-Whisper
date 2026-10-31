@@ -139,6 +139,14 @@
     "windows_title": "Windows"
   },
   "transl": {
+    "whisper_select_stt": "Select OpenAI Whisper in Speech to Text first.",
+    "whisper_description": "Translate speech from any language supported by your Whisper model into English text, locally. Typed text and other speech recognition providers are not supported.",
+    "whisper_model": "Shared Speech to Text model: {{model}}",
+    "whisper_language": "Shared source language: {{language}} → English",
+    "whisper_setup": "Choose and download a multilingual model in Speech to Text, set the spoken language (or Auto detect), then start Speech to Text and Translation. The same model and microphone are reused. Use the Translation text source for English captions.",
+    "whisper_waiting": "Waiting for Speech to Text. Start Whisper there to capture speech.",
+    "whisper_interim": "Interim translations also require interim results in Speech to Text. Translating alongside original captions takes an additional inference pass. Leave interim translations off for lower load.",
+
     "title": "Translation",
     "azure_title": "Azure",
     "azure_key": "Key",

@@ -2,7 +2,10 @@ import { invoke } from "@tauri-apps/api/tauri";
 import { ISTTReceiver, ISTTService } from "../types";
 import { STT_State } from "../schema";
 import { microphoneConstraints } from "../mic";
-import { whisperModelById } from "../whisper_models";
+import { whisperModelById, whisperSupportsTranslation } from "../whisper_models";
+import { captureWhisperTranslation } from "../whisper_audio";
+
+type WhisperSession = { port: number; session_id: number; backend: string; device: string };
 
 type VerboseSegment = { text?: string; no_speech_prob?: number };
 
@@ -34,9 +37,11 @@ function isCaptionNoise(text: string): boolean {
   ].includes(lower);
 }
 
-async function transcribeWav(wav: Uint8Array, language: string, translate: boolean): Promise<string> {
+async function transcribeWav(wav: Uint8Array, language: string, translate: boolean, sessionId?: number): Promise<string> {
   if (window.Config.isApp()) {
+    if (sessionId === undefined) throw new Error("Whisper session is not running");
     return invoke<string>("plugin:whisper|transcribe", {
+      sessionId,
       wavBase64: bytesToBase64(wav),
       language,
       translate,
@@ -54,7 +59,11 @@ async function transcribeWav(wav: Uint8Array, language: string, translate: boole
   body.append("no_speech_thold", "0.6");
   const response = await fetch("/api/whisper/inference", { method: "POST", body });
   if (!response.ok) throw new Error(await response.text() || "Whisper preview failed");
-  return cleanWebTranscript(await response.json());
+  const result = await response.json();
+  if (translate && result.task !== "translate") {
+    throw new Error("Whisper returned transcription instead of translation. Restart Speech to Text with a multilingual model (not .en or Turbo).");
+  }
+  return cleanWebTranscript(result);
 }
 
 function encodeWav(samples: Float32Array, sampleRate: number): Uint8Array {
@@ -119,6 +128,8 @@ export class STT_WhisperService implements ISTTService {
   constructor(private bindings: ISTTReceiver) {}
 
   #stopped = false;
+  #sessionId?: number;
+  #pending = 0;
   #ctx?: AudioContext;
   #stream?: MediaStream;
   #processor?: ScriptProcessorNode;
@@ -140,20 +151,34 @@ export class STT_WhisperService implements ISTTService {
     const model = this.state.whisper.model || "tiny";
     try {
       if (window.Config.isApp()) {
-        await invoke("plugin:whisper|ensure_session", { model });
+        window.ApiServer.stt.serviceState.whisperDevice = "Loading Whisper runtime and model…";
+        const session = await invoke<WhisperSession>("plugin:whisper|ensure_session", {
+          model,
+          acceleration: this.state.whisper.acceleration,
+          gpuDevice: this.state.whisper.gpuDevice,
+        });
+        this.#sessionId = session.session_id;
+        if (!this.#stopped) {
+          window.ApiServer.stt.serviceState.whisperDevice = session.backend.startsWith("cuda")
+            ? `GPU: NVIDIA ${session.device} (CUDA, model allocation verified)`
+            : "CPU";
+        }
       } else if (model !== "tiny") {
         throw new Error("This preview can try Whisper Tiny. Other models download in the desktop app, into the Models folder next to Curses.");
       } else {
+        window.ApiServer.stt.serviceState.whisperDevice = "Browser preview — device managed by preview server";
         const health = await fetch("/api/whisper/health");
         if (!health.ok) throw new Error("Whisper is still starting. Press start again in a moment.");
       }
     } catch (error) {
       const message = error instanceof Error ? error.message : String(error);
+      if (this.#stopped) return;
+      window.ApiServer.stt.serviceState.whisperDevice = "Whisper failed to start";
       this.bindings.onStop(message || "Could not start Whisper");
       return;
     }
     if (this.#stopped) {
-      if (window.Config.isApp()) invoke("plugin:whisper|stop_session").catch(() => {});
+      this.#stopSession();
       return;
     }
 
@@ -163,13 +188,16 @@ export class STT_WhisperService implements ISTTService {
       );
     } catch (error) {
       const message = error instanceof Error ? error.message : "Microphone error";
-      this.bindings.onStop(message);
-      if (window.Config.isApp()) invoke("plugin:whisper|stop_session").catch(() => {});
+      if (!this.#stopped) {
+        window.ApiServer.stt.serviceState.whisperDevice = "Stopped (microphone error)";
+        this.bindings.onStop(message);
+      }
+      this.#stopSession();
       return;
     }
     if (this.#stopped) {
       this.#releaseMic();
-      if (window.Config.isApp()) invoke("plugin:whisper|stop_session").catch(() => {});
+      this.#stopSession();
       return;
     }
 
@@ -238,20 +266,31 @@ export class STT_WhisperService implements ISTTService {
   }
 
   #queue(samples: Float32Array, isFinal: boolean) {
+    // Never accumulate obsolete interim snapshots behind slow model inference.
+    if (!isFinal && this.#pending > 0) return;
+    this.#pending++;
+    const deliverTranslation = captureWhisperTranslation();
+    const wasMuted = window.ApiServer.stt.isMuted();
     this.#chain = this.#chain
-      .then(() => this.#transcribe(samples, isFinal))
-      .catch(() => {});
+      .then(() => this.#transcribe(samples, isFinal, deliverTranslation, wasMuted))
+      .catch(() => {})
+      .finally(() => { this.#pending--; });
   }
 
-  async #transcribe(samples: Float32Array, isFinal: boolean) {
+  async #transcribe(
+    samples: Float32Array,
+    isFinal: boolean,
+    deliverTranslation: ReturnType<typeof captureWhisperTranslation>,
+    wasMuted: boolean,
+  ) {
     if (this.#stopped) return;
     const info = whisperModelById(this.state.whisper.model);
     const language = info.english ? "en" : (this.state.whisper.language || "auto");
-    const translate = info.english ? false : !!this.state.whisper.translate;
+    const translate = whisperSupportsTranslation(info.id) && !!this.state.whisper.translate;
     const wav = encodeWav(samples, 16000);
     let text = "";
     try {
-      text = await transcribeWav(wav, language, translate);
+      text = await transcribeWav(wav, language, translate, this.#sessionId);
     } catch (error) {
       if (this.#stopped) return;
       const message = error instanceof Error ? error.message : String(error);
@@ -263,6 +302,16 @@ export class STT_WhisperService implements ISTTService {
     if (!text || this.#stopped) return;
     if (isFinal) this.bindings.onFinal(text);
     else this.bindings.onInterim(text);
+    if (!wasMuted) {
+      await deliverTranslation({
+        model: info.id,
+        language,
+        isFinal,
+        englishText: translate ? text : undefined,
+        translate: (sourceLanguage = language) => transcribeWav(wav, sourceLanguage, true, this.#sessionId),
+        isCurrent: () => !this.#stopped && !window.ApiServer.stt.isMuted(),
+      });
+    }
   }
 
   #releaseMic() {
@@ -274,11 +323,20 @@ export class STT_WhisperService implements ISTTService {
     this.#ctx = undefined;
   }
 
+  #stopSession(): void {
+    const sessionId = this.#sessionId;
+    this.#sessionId = undefined;
+    if (window.Config.isApp() && sessionId !== undefined) {
+      invoke("plugin:whisper|stop_session", { sessionId }).catch(() => {});
+    }
+  }
+
   stop(): void {
     this.#stopped = true;
+    window.ApiServer.stt.serviceState.whisperDevice = "Stopped";
     this.#resetUtterance();
     this.#releaseMic();
-    if (window.Config.isApp()) invoke("plugin:whisper|stop_session").catch(() => {});
+    this.#stopSession();
     this.bindings.onStop();
   }
 }

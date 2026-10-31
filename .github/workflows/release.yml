@@ -3,28 +3,36 @@ name: release
 on:
   workflow_dispatch:
   push:
+    branches: [master]
+    paths:
+      - src-tauri/Cargo.toml
+      - .github/workflows/release.yml
     tags:
       - "v*"
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
 
 jobs:
   windows:
     permissions:
       contents: write
     runs-on: windows-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-
       - uses: pnpm/action-setup@v4
         with:
           version: 9
-
       - uses: actions/setup-node@v4
         with:
           node-version: 20
-          cache: pnpm
-
+          cache: npm
       - uses: dtolnay/rust-toolchain@stable
-
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: src-tauri
       - name: Read app version
         id: version
         shell: pwsh
@@ -32,18 +40,28 @@ jobs:
           $line = Select-String -Path src-tauri/Cargo.toml -Pattern '^version = "(.+)"' | Select-Object -First 1
           $version = $line.Matches[0].Groups[1].Value
           "value=$version" | Out-File -FilePath $env:GITHUB_OUTPUT -Append
-
       - name: Install frontend dependencies
-        run: pnpm install --frozen-lockfile
-
+        run: npm ci --legacy-peer-deps
+      - name: Translation service tests
+        run: npx playwright test tests/whisper-translation.spec.ts --project=chromium --reporter=list
+      - name: Native runtime and process cleanup tests
+        run: cargo test --manifest-path src-tauri/Cargo.toml --no-default-features services::whisper
       - name: Build Windows installers
         run: pnpm tauri build
-
+      - name: Upload installers
+        uses: actions/upload-artifact@v4
+        with:
+          name: Curses-Whisper-Windows-${{ steps.version.outputs.value }}
+          if-no-files-found: error
+          path: |
+            src-tauri/target/release/bundle/nsis/*-setup.exe
+            src-tauri/target/release/bundle/msi/*.msi
       - name: Publish GitHub release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: v${{ steps.version.outputs.value }}
-          name: Curses v${{ steps.version.outputs.value }} Whisper fork
+          target_commitish: ${{ github.sha }}
+          name: Curses Whisper v${{ steps.version.outputs.value }} — Translation and CUDA
           draft: false
           prerelease: false
           fail_on_unmatched_files: true
@@ -51,14 +69,21 @@ jobs:
             src-tauri/target/release/bundle/nsis/*-setup.exe
             src-tauri/target/release/bundle/msi/*.msi
           body: |
-            Unofficial Windows build of Curses with local Whisper speech-to-text and one microphone picker for every caption service.
+            Local Whisper transcription and speech-to-English translation, now in Curses-Whisper.
 
-            The Whisper integration was written by Grok (xAI). It was only tested enough to see that the functions ran. This is not an official Curses release. There is no warranty. Use it at your own risk.
+            - Translation reuses the STT microphone and loaded model, with its own source-language setting and English result preview.
+            - NVIDIA CUDA is the default on Windows x64; an explicit CPU option and verified GPU status are available.
+            - Whisper shuts down with Curses, including Windows force-close cleanup.
+            - Interim-caption requests no longer accumulate behind busy inference.
+            - Updated README, setup instructions and repository links.
 
-            Download the setup `.exe` (normal installer) or the `.msi` from the assets on this release.
+            Run both Speech to Text and Translation. To display English in the overlay, select the caption element, open Source, and set Text source to Translation.
 
-            Windows may warn that the installer is unrecognized because it is not code-signed. The first time you choose a Whisper model, stay online until that model and the runtime finish downloading into the Models folder next to the app.
+            Use a multilingual Tiny, Base, Small, Medium or Large model for translation. English-only .en models and Turbo cannot translate.
 
-            Original app: https://github.com/mmpneo/curses
+            Download the setup EXE for a normal Windows installation, or use the MSI. First CUDA startup downloads approximately 685 MB of runtime files; existing models are reused. A compatible NVIDIA driver is required.
+
+            These installers are unsigned. See the README for setup, credits and licensing:
+            https://github.com/HaitchKay1/Curses-Whisper#readme
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

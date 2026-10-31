@@ -41,6 +41,7 @@ fn get_port(state: State<'_, InitArguments>) -> u16 {
 
 #[command]
 fn app_close(app_handle: tauri::AppHandle) {
+    services::whisper::shutdown(&app_handle);
     let Some(window) = app_handle.get_window("main") else {
         return app_handle.exit(0);
     };

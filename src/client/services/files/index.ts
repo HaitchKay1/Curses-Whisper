@@ -123,7 +123,7 @@ class Service_Files implements IServiceInterface {
     for (let id of add) {
       const metaIndex = filesMeta.findIndex((m) => m.id === id)!;
       const meta = filesMeta[metaIndex]!;
-      const rawFile = window.ApiClient.document.fileArray.get(metaIndex);
+      const rawFile = Uint8Array.from(window.ApiClient.document.fileArray.get(metaIndex));
       const blob = new Blob([rawFile], { type: meta.type });
       this.fileUrls[id] = URL.createObjectURL(blob);
 

@@ -3,6 +3,7 @@ import { z } from "zod";
 
 export enum Translation_Backends {
   azure = "azure",
+  whisper = "whisper",
 }
 const zodTranslation_Backends = z.nativeEnum(Translation_Backends);
 
@@ -10,6 +11,10 @@ export const Service_Translation_Schema = z.object({
   backend: zSafe(zodTranslation_Backends, Translation_Backends.azure),
   autoStart: zSafe(z.coerce.boolean(), false),
   inputField: zSafe(z.coerce.boolean(), true),
+  whisper: z.object({
+    language: zSafe(z.coerce.string(), "auto"),
+    interim: zSafe(z.coerce.boolean(), false),
+  }).default({}),
   azure: z.object({
     key: zSafe(z.coerce.string(), ""),
     location: zSafe(z.coerce.string(), ""),

@@ -1,6 +1,11 @@
+mod acceleration;
+mod process;
+use acceleration::{Backend, verified_cuda_device};
+use process::WhisperProcess;
+
 use std::path::{Path, PathBuf};
-use std::process::{Child, Command, Stdio};
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::process::{Command, Stdio};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
@@ -48,7 +53,10 @@ struct DownloadEvent {
 }
 
 struct WhisperState {
-    child: Mutex<Option<Child>>,
+    child: Mutex<Option<WhisperProcess>>,
+    session_lock: tokio::sync::Mutex<()>,
+    generation: AtomicU64,
+    exiting: AtomicBool,
     port: Mutex<Option<u16>>,
     running_model: Mutex<Option<String>>,
     dl_lock: tokio::sync::Mutex<()>,
@@ -61,6 +69,9 @@ impl Default for WhisperState {
     fn default() -> Self {
         Self {
             child: Mutex::new(None),
+            session_lock: tokio::sync::Mutex::new(()),
+            generation: AtomicU64::new(0),
+            exiting: AtomicBool::new(false),
             port: Mutex::new(None),
             running_model: Mutex::new(None),
             dl_lock: tokio::sync::Mutex::new(()),
@@ -77,11 +88,10 @@ impl Drop for WhisperState {
     }
 }
 
-fn stop_child(slot: &Mutex<Option<Child>>) {
+fn stop_child(slot: &Mutex<Option<WhisperProcess>>) {
     if let Ok(mut guard) = slot.lock() {
         if let Some(mut child) = guard.take() {
-            let _ = child.kill();
-            let _ = child.wait();
+            child.kill();
         }
     }
 }
@@ -159,7 +169,7 @@ fn http_client() -> Result<reqwest::Client, String> {
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(20))
         .redirect(reqwest::redirect::Policy::limited(10))
-        .user_agent("curses/0.0.20")
+        .user_agent("curses/0.0.23")
         .build()
         .map_err(|err| err.to_string())
 }
@@ -272,9 +282,13 @@ fn server_on_path() -> Option<PathBuf> {
     None
 }
 
-fn runtime_archive() -> Option<(&'static str, &'static str)> {
+fn runtime_archive(backend: Backend) -> Option<(&'static str, &'static str)> {
     if cfg!(all(windows, target_arch = "x86_64")) {
-        Some(("https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip", "zip"))
+        if backend == Backend::Cuda {
+            Some(("https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-win-cuda-12.4.0-x64.zip", "zip"))
+        } else {
+            Some(("https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-x64.zip", "zip"))
+        }
     } else if cfg!(all(target_os = "linux", target_arch = "x86_64")) {
         Some(("https://github.com/ggml-org/whisper.cpp/releases/download/b5454/whisper-bin-ubuntu-x64.tar.gz", "tar.gz"))
     } else {
@@ -320,23 +334,26 @@ fn make_executable(path: &Path) {
 }
 
 impl WhisperState {
-    async fn ensure_runtime<R: Runtime>(&self, app: &AppHandle<R>) -> Result<PathBuf, String> {
+    async fn ensure_runtime<R: Runtime>(&self, app: &AppHandle<R>, backend: Backend) -> Result<PathBuf, String> {
         let _guard = self.rt_lock.lock().await;
-        let root = resolve_models_dir()?.join("runtime");
+        let root = resolve_models_dir()?.join("runtime").join(RUNTIME_TAG).join(backend.key());
         std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
-        if let Some(existing) = find_named(&root, server_name()) {
+        if let Some(existing) = find_named(&root.join("files"), server_name()).filter(|_| root.join("ready").is_file()) {
             #[cfg(unix)]
             make_executable(&existing);
             return Ok(existing);
         }
-        let Some((url, kind)) = runtime_archive() else {
+        let Some((url, kind)) = runtime_archive(backend) else {
             return server_on_path().ok_or_else(|| {
                 "Whisper runtime is available automatically on 64-bit Windows and Linux. On this system, install whisper-server and make sure it is on PATH.".into()
             });
         };
         let archive = root.join(if kind == "zip" { "runtime.zip" } else { "runtime.tar.gz" });
-        download_to(app, "runtime", "runtime", url, &archive, 10_000_000, "Whisper runtime", None).await?;
-        let unpacked = root.join(RUNTIME_TAG);
+        let expected = if backend == Backend::Cuda { 684_913_404 } else { 10_000_000 };
+        let label = if backend == Backend::Cuda { "Whisper NVIDIA CUDA runtime" } else { "Whisper CPU runtime" };
+        download_to(app, "runtime", "runtime", url, &archive, expected, label, Some(&self.exiting)).await?;
+        let unpacked = root.join("files");
+        if unpacked.exists() { std::fs::remove_dir_all(&unpacked).map_err(|err| err.to_string())?; }
         std::fs::create_dir_all(&unpacked).map_err(|err| err.to_string())?;
         if kind == "zip" {
             unzip_to(&archive, &unpacked)?;
@@ -347,10 +364,12 @@ impl WhisperState {
         let binary = find_named(&unpacked, server_name()).ok_or_else(|| "Whisper runtime did not include whisper-server".to_string())?;
         #[cfg(unix)]
         make_executable(&binary);
+        std::fs::write(root.join("ready"), RUNTIME_TAG).map_err(|err| err.to_string())?;
         Ok(binary)
     }
 
     async fn ensure_model<R: Runtime>(&self, app: &AppHandle<R>, model: &str) -> Result<PathBuf, String> {
+        if self.exiting.load(Ordering::SeqCst) { return Err("Curses is closing".into()); }
         let spec = model_spec(model)?;
         let path = resolve_models_dir()?.join(spec.file);
         if model_file_ready(&path, spec.bytes) {
@@ -372,6 +391,7 @@ impl WhisperState {
         if self.dl_model.lock().map_err(|err| err.to_string())?.as_deref() != Some(model) {
             return Err("Download cancelled".into());
         }
+        if self.exiting.load(Ordering::SeqCst) { return Err("Curses is closing".into()); }
         self.dl_cancel.store(false, Ordering::SeqCst);
         let url = format!(
             "https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{}?download=true",
@@ -421,7 +441,7 @@ fn hide_console(cmd: &mut Command) {
     }
 }
 
-fn start_server(binary: &Path, model: &Path, port: u16) -> Result<Child, String> {
+fn start_server(binary: &Path, model: &Path, port: u16, backend: Backend, device: u32) -> Result<WhisperProcess, String> {
     let folder = binary.parent().ok_or_else(|| "Missing Whisper runtime folder".to_string())?;
     let public = folder.join("public");
     std::fs::create_dir_all(&public).ok();
@@ -435,7 +455,7 @@ fn start_server(binary: &Path, model: &Path, port: u16) -> Result<Child, String>
         .arg("-l").arg("auto")
         .arg("-t").arg(threads.to_string())
         .arg("-nt")
-        .arg("--no-gpu")
+        .args(backend.args(device))
         .arg("--suppress-nst")
         .stdin(Stdio::null());
     if let Ok(log_path) = resolve_models_dir().map(|dir| dir.join("whisper-server.log")) {
@@ -446,7 +466,7 @@ fn start_server(binary: &Path, model: &Path, port: u16) -> Result<Child, String>
         }
     }
     hide_console(&mut cmd);
-    cmd.spawn().map_err(|err| format!("Could not start Whisper: {err}"))
+    WhisperProcess::spawn(&mut cmd)
 }
 
 async fn health_ok(port: u16) -> bool {
@@ -459,7 +479,7 @@ async fn health_ok(port: u16) -> bool {
     response.text().await.map(|text| text.contains("ok")).unwrap_or(false)
 }
 
-async fn wait_healthy(child: &Mutex<Option<Child>>, port: u16) -> Result<(), String> {
+async fn wait_healthy(child: &Mutex<Option<WhisperProcess>>, port: u16) -> Result<(), String> {
     for _ in 0..400 {
         {
             let mut guard = child.lock().map_err(|err| err.to_string())?;
@@ -526,49 +546,83 @@ fn models_dir() -> Result<String, String> {
 
 #[command]
 async fn download_model<R: Runtime>(model: String, app: AppHandle<R>, state: State<'_, WhisperState>) -> Result<(), String> {
-    state.ensure_runtime(&app).await?;
     state.ensure_model(&app, &model).await?;
     Ok(())
 }
 
-#[command]
-async fn ensure_session<R: Runtime>(model: String, app: AppHandle<R>, state: State<'_, WhisperState>) -> Result<u16, String> {
-    let binary = state.ensure_runtime(&app).await?;
-    let model_path = state.ensure_model(&app, &model).await?;
-    let already = state.running_model.lock().map_err(|err| err.to_string())?.clone();
-    let port = state.port.lock().map_err(|err| err.to_string())?.clone();
-    if already.as_deref() == Some(model.as_str()) {
-        if let Some(port) = port {
-            if health_ok(port).await {
-                return Ok(port);
-            }
-        }
-    }
-    stop_child(&state.child);
-    if let Ok(mut running) = state.running_model.lock() {
-        *running = None;
-    }
-    let port = pick_port()?;
-    let child = start_server(&binary, &model_path, port)?;
-    *state.child.lock().map_err(|err| err.to_string())? = Some(child);
-    *state.port.lock().map_err(|err| err.to_string())? = Some(port);
-    if let Err(err) = wait_healthy(&state.child, port).await {
-        stop_child(&state.child);
-        return Err(err);
-    }
-    *state.running_model.lock().map_err(|err| err.to_string())? = Some(model);
-    Ok(port)
+#[derive(Clone, Serialize)]
+struct SessionInfo {
+    port: u16,
+    session_id: u64,
+    backend: String,
+    device: String,
 }
 
 #[command]
-fn stop_session(state: State<'_, WhisperState>) {
+async fn ensure_session<R: Runtime>(
+    model: String, acceleration: Option<String>, gpu_device: Option<u32>,
+    app: AppHandle<R>, state: State<'_, WhisperState>,
+) -> Result<SessionInfo, String> {
+    let _session_guard = state.session_lock.lock().await;
+    if state.exiting.load(Ordering::SeqCst) { return Err("Curses is closing".into()); }
+    let session_id = state.generation.fetch_add(1, Ordering::SeqCst) + 1;
     stop_child(&state.child);
-    if let Ok(mut port) = state.port.lock() {
-        *port = None;
+    *state.port.lock().map_err(|e| e.to_string())? = None;
+    *state.running_model.lock().map_err(|e| e.to_string())? = None;
+    let backend = Backend::select(acceleration.as_deref().unwrap_or("auto"), cfg!(all(windows, target_arch = "x86_64")))?;
+    let gpu_device = gpu_device.unwrap_or(0);
+    if gpu_device > 31 { return Err("GPU device ID must be between 0 and 31".into()); }
+    let binary = state.ensure_runtime(&app, backend).await?;
+    let model_path = state.ensure_model(&app, &model).await?;
+    let port = pick_port()?;
+    {
+        // Exit cleanup takes the same lock, so it cannot miss a newly spawned child.
+        let mut slot = state.child.lock().map_err(|e| e.to_string())?;
+        if state.exiting.load(Ordering::SeqCst) || state.generation.load(Ordering::SeqCst) != session_id {
+            return Err("Whisper startup cancelled".into());
+        }
+        *slot = Some(start_server(&binary, &model_path, port, backend, gpu_device)?);
     }
-    if let Ok(mut running) = state.running_model.lock() {
-        *running = None;
+    if let Err(err) = wait_healthy(&state.child, port).await {
+        stop_child(&state.child);
+        return Err(format!("{err} If using CUDA, update your NVIDIA driver or explicitly select CPU in Speech to Text."));
     }
+    let device = if backend == Backend::Cuda {
+        let log = std::fs::read_to_string(resolve_models_dir()?.join("whisper-server.log")).unwrap_or_default();
+        match verified_cuda_device(&log) {
+            Some(device) => device,
+            None => {
+                stop_child(&state.child);
+                return Err("CUDA was requested but GPU model allocation could not be verified. Whisper was stopped instead of silently running on CPU. Check whisper-server.log, update your NVIDIA driver, or select CPU explicitly.".into());
+            }
+        }
+    } else { "CPU".into() };
+    if state.exiting.load(Ordering::SeqCst) || state.generation.load(Ordering::SeqCst) != session_id {
+        stop_child(&state.child);
+        return Err("Whisper startup cancelled".into());
+    }
+    *state.port.lock().map_err(|err| err.to_string())? = Some(port);
+    *state.running_model.lock().map_err(|err| err.to_string())? = Some(model);
+    Ok(SessionInfo { port, session_id, backend: backend.key().into(), device })
+}
+
+#[command]
+fn stop_session(session_id: u64, state: State<'_, WhisperState>) {
+    // A delayed stop from the old microphone must not kill the replacement session.
+    let mut child = match state.child.lock() { Ok(child) => child, Err(_) => return };
+    if state.generation.load(Ordering::SeqCst) != session_id { return; }
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    if let Some(mut process) = child.take() { process.kill(); }
+    if let Ok(mut port) = state.port.lock() { *port = None; }
+    if let Ok(mut running) = state.running_model.lock() { *running = None; }
+}
+
+pub fn shutdown<R: Runtime>(app: &AppHandle<R>) {
+    let state = app.state::<WhisperState>();
+    state.exiting.store(true, Ordering::SeqCst);
+    state.dl_cancel.store(true, Ordering::SeqCst);
+    state.generation.fetch_add(1, Ordering::SeqCst);
+    stop_child(&state.child);
 }
 
 #[command]
@@ -576,8 +630,10 @@ async fn transcribe(
     wav_base64: String,
     language: String,
     translate: bool,
+    session_id: u64,
     state: State<'_, WhisperState>,
 ) -> Result<String, String> {
+    if state.generation.load(Ordering::SeqCst) != session_id { return Err("Whisper session was replaced".into()); }
     let port = state.port.lock().map_err(|err| err.to_string())?.clone().ok_or_else(|| "Whisper is not running".to_string())?;
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(wav_base64.trim())
@@ -611,6 +667,9 @@ async fn transcribe(
         return Err(format!("Whisper error {status}: {body}"));
     }
     let value: serde_json::Value = response.json().await.map_err(|err| err.to_string())?;
+    if translate && value.get("task").and_then(|task| task.as_str()) != Some("translate") {
+        return Err("Whisper returned transcription instead of translation. Restart Speech to Text with a multilingual model (not .en or Turbo).".into());
+    }
     Ok(clean_transcript(&value))
 }
 
@@ -626,6 +685,9 @@ pub fn init<R: Runtime>() -> TauriPlugin<R> {
         .setup(|app| {
             app.manage(WhisperState::default());
             Ok(())
+        })
+        .on_event(|app, event| {
+            if matches!(event, tauri::RunEvent::Exit) { shutdown(app); }
         })
         .build()
 }

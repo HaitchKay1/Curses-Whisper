@@ -7,7 +7,7 @@ import { RiCharacterRecognitionFill, RiUserVoiceFill } from "react-icons/ri";
 import { SiGooglechrome, SiMicrosoftedge } from "react-icons/si";
 import { useSnapshot } from "valtio";
 import { azureLanguages, deepGramLangs, nativeLangs } from "../../services/stt/stt_data";
-import { WHISPER_LANGUAGES, WHISPER_MODELS, whisperModelById } from "../../services/stt/whisper_models";
+import { WHISPER_LANGUAGES, WHISPER_MODELS, whisperModelById, whisperLanguagesForModel, whisperSupportsTranslation } from "../../services/stt/whisper_models";
 import ServiceButton from "../service-button";
 import Inspector from "./components";
 import { InputCheckbox, InputMapObject, InputMappedGroupSelect, InputSelect, InputText, InputWebAudioInput } from "./components/input";
@@ -191,6 +191,7 @@ const Whisper: FC = () => {
   const pr = useSnapshot(window.ApiServer.state.services.stt.data.whisper);
   const up = <K extends keyof STT_State["whisper"]>(key: K, v: STT_State["whisper"][K]) => window.ApiServer.state.services.stt.data.whisper[key] = v;
   const model = whisperModelById(pr.model);
+  const runtime = useSnapshot(window.ApiServer.stt.serviceState);
   const [progress, setProgress] = useState<WhisperProgress | null>(null);
   const [modelsDir, setModelsDir] = useState("");
   const [ready, setReady] = useState(false);
@@ -212,7 +213,7 @@ const Whisper: FC = () => {
     }
     invoke<string>("plugin:whisper|models_dir").then(setModelsDir).catch(() => {});
     listen<WhisperProgress>("whisper-download", (event) => {
-      if (event.payload.model === window.ApiServer.state.services.stt.data.whisper.model)
+      if (event.payload.model === "runtime" || event.payload.model === window.ApiServer.state.services.stt.data.whisper.model)
         setProgress(event.payload);
     }).then(fn => {
       if (cancel) fn();
@@ -239,16 +240,28 @@ const Whisper: FC = () => {
   return <>
     <Inspector.SubHeader>{t('stt.whisper_title')}</Inspector.SubHeader>
     <Inspector.Description>{t('stt.whisper_offline')}</Inspector.Description>
+    <InputSelect label="Whisper processing device" value={pr.acceleration} options={[
+      { label: "Automatic (NVIDIA CUDA on Windows)", value: "auto" },
+      { label: "NVIDIA GPU (CUDA)", value: "cuda" },
+      { label: "CPU", value: "cpu" },
+    ]} onValueChange={value => up("acceleration", value as STT_State["whisper"]["acceleration"])} />
+    {pr.acceleration !== "cpu" && <InputText label="CUDA GPU index" type="number" min="0" max="31" step="1"
+      value={pr.gpuDevice} onChange={e => {
+        const value = Number(e.target.value);
+        if (Number.isInteger(value) && value >= 0 && value <= 31) up("gpuDevice", value);
+      }} />}
+    <Inspector.Description>CUDA accelerates both transcription and Translation. The first GPU start downloads the CUDA runtime once (about 685 MB). Models are reused. If GPU initialization fails, select CPU explicitly or check the NVIDIA driver and server log.</Inspector.Description>
+    <Inspector.Description>{runtime.whisperDevice || "Processing device will be verified when Whisper starts."}</Inspector.Description>
     <InputSelect
       label="stt.whisper_language"
-      options={model.english ? [{ label: "English", value: "en" }] : WHISPER_LANGUAGES}
+      options={model.english ? [{ label: "English", value: "en" }] : whisperLanguagesForModel(pr.model)}
       value={model.english ? "en" : pr.language}
       onValueChange={e => up("language", e)}
     />
-    {!model.english && <InputCheckbox label="stt.whisper_translate" value={pr.translate} onChange={e => up("translate", e)} />}
+    {whisperSupportsTranslation(pr.model) && <InputCheckbox label="stt.whisper_translate" value={pr.translate} onChange={e => up("translate", e)} />}
     <InputCheckbox label="stt.field_enable_interim_results" onChange={e => up("interim", e)} value={pr.interim} />
     <InputText type="number" step="0.1" min="0.3" label="stt.whisper_silence" value={pr.silenceTimeout} onChange={e => up("silenceTimeout", e.target.value)} />
-    {progress && !progress.done && !ready && <div className="space-y-1">
+    {progress && !progress.done && (progress.model === "runtime" || !ready) && <div className="space-y-1">
       <progress className="progress progress-primary w-full" value={pct} max={100}></progress>
       <span className="text-xs text-base-content/70">{progress.message || t('stt.whisper_downloading')} {pct ? `${pct}%` : ""} {progress.total ? `(${formatBytes(progress.received)} / ${formatBytes(progress.total)})` : ""}</span>
     </div>}

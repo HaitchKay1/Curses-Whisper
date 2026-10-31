@@ -44,6 +44,7 @@ class Service_STT implements IServiceInterface, ISTTReceiver {
   serviceState = proxy({
     status: ServiceNetworkState.disconnected,
     error: "",
+    whisperDevice: "",
     muted: SttMuteState.unmuted
   });
 

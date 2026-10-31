@@ -54,6 +54,8 @@ export const Service_STT_Schema = z.object({
     interim: zSafe(z.coerce.boolean(), true),
   }).default({}),
   whisper: z.object({
+    acceleration: zSafe(z.enum(["auto", "cuda", "cpu"]), "auto"),
+    gpuDevice: zSafe(z.number().int().min(0).max(31), 0),
     model: zSafe(z.coerce.string(), "tiny"),
     language: zSafe(z.coerce.string(), "auto"),
     translate: zSafe(z.coerce.boolean(), false),
