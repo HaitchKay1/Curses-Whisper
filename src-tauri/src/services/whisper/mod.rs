@@ -1,4 +1,3 @@
-use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -87,7 +86,7 @@ fn stop_child(slot: &Mutex<Option<Child>>) {
     }
 }
 
-fn emit(app: &AppHandle, event: DownloadEvent) {
+fn emit<R: Runtime>(app: &AppHandle<R>, event: DownloadEvent) {
     let _ = app.emit_all("whisper-download", event);
 }
 
@@ -165,8 +164,8 @@ fn http_client() -> Result<reqwest::Client, String> {
         .map_err(|err| err.to_string())
 }
 
-async fn download_to(
-    app: &AppHandle,
+async fn download_to<R: Runtime>(
+    app: &AppHandle<R>,
     model: &str,
     phase: &str,
     url: &str,
@@ -321,7 +320,7 @@ fn make_executable(path: &Path) {
 }
 
 impl WhisperState {
-    async fn ensure_runtime(&self, app: &AppHandle) -> Result<PathBuf, String> {
+    async fn ensure_runtime<R: Runtime>(&self, app: &AppHandle<R>) -> Result<PathBuf, String> {
         let _guard = self.rt_lock.lock().await;
         let root = resolve_models_dir()?.join("runtime");
         std::fs::create_dir_all(&root).map_err(|err| err.to_string())?;
@@ -351,7 +350,7 @@ impl WhisperState {
         Ok(binary)
     }
 
-    async fn ensure_model(&self, app: &AppHandle, model: &str) -> Result<PathBuf, String> {
+    async fn ensure_model<R: Runtime>(&self, app: &AppHandle<R>, model: &str) -> Result<PathBuf, String> {
         let spec = model_spec(model)?;
         let path = resolve_models_dir()?.join(spec.file);
         if model_file_ready(&path, spec.bytes) {
@@ -526,14 +525,14 @@ fn models_dir() -> Result<String, String> {
 }
 
 #[command]
-async fn download_model(model: String, app: AppHandle, state: State<'_, WhisperState>) -> Result<(), String> {
+async fn download_model<R: Runtime>(model: String, app: AppHandle<R>, state: State<'_, WhisperState>) -> Result<(), String> {
     state.ensure_runtime(&app).await?;
     state.ensure_model(&app, &model).await?;
     Ok(())
 }
 
 #[command]
-async fn ensure_session(model: String, app: AppHandle, state: State<'_, WhisperState>) -> Result<u16, String> {
+async fn ensure_session<R: Runtime>(model: String, app: AppHandle<R>, state: State<'_, WhisperState>) -> Result<u16, String> {
     let binary = state.ensure_runtime(&app).await?;
     let model_path = state.ensure_model(&app, &model).await?;
     let already = state.running_model.lock().map_err(|err| err.to_string())?.clone();
@@ -616,7 +615,7 @@ async fn transcribe(
 }
 
 pub fn init<R: Runtime>() -> TauriPlugin<R> {
-    Builder::new("whisper")
+    Builder::<R>::new("whisper")
         .invoke_handler(tauri::generate_handler![
             models_dir,
             download_model,
